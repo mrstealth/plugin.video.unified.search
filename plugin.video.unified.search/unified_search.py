@@ -1,4 +1,7 @@
-import os, sys, json
+import sys
+import json
+import urllib
+
 import xbmc
 import xbmcplugin
 import xbmcgui
@@ -18,93 +21,121 @@ class UnifiedSearch():
         self.icon = self.addon.getAddonInfo('icon')
         self.path = self.addon.getAddonInfo('path')
         self.profile = self.addon.getAddonInfo('profile')
+
+        self.xpath = sys.argv[0]
         self.handle = int(sys.argv[1])
 
         self.supported_addons = self.get_supported_addons()
-        self.count = 0
+        self.debug = False
 
     def main(self):
+        self.log("\nAddon: %s \nHandle: %s\nParams: %s " % (sys.argv[0], sys.argv[1], sys.argv[2]))
+
         params = common.getParameters(sys.argv[2])
         mode = params['mode'] if 'mode' in params else None
-        query = params['query'] if 'query' in params else None
-        results = params['results'] if 'results' in params else None
+        keyword = params['keyword'] if 'keyword' in params else None
+
+        url = params['url'] if 'url' in params else None
+        plugin = params['plugin'] if 'plugin' in params else None
 
         if mode == 'search':
-            self.search(query)
-        if mode == 'collect':
-            self.collect(results)
+            self.search(keyword)
+        if mode == 'reset':
+            self.resetResults()
+        if mode == 'play':
+            self.play(plugin, url)
         elif mode is None:
             self.menu()
 
     def menu(self):
-        print "*** UnifiedSearch: Main menu"
-        
-        uri = sys.argv[0] + '?mode=%s' % "search"
+        self.log("Main menu")
+        self.log("Supported add-ons: %s" % self.supported_addons)
+
+        uri = self.xpath + '?mode=%s' % "search"
         item = xbmcgui.ListItem("Search for video", thumbnailImage=self.icon)
         xbmcplugin.addDirectoryItem(self.handle, uri, item, True)
 
-        print self.supported_addons
+        for i, item in enumerate(self.getSearchResults()):
+            uri = '%s?mode=play&plugin=%s&url=%s' % (self.xpath, item['plugin'], item['url'])
 
-        results =  self.getSearchResults()
+            item = xbmcgui.ListItem("%s (%s)" % (item['title'], item['plugin']), thumbnailImage=item['image'])
+            xbmcplugin.addDirectoryItem(self.handle, uri, item, False)
 
-        for i, item in enumerate(results):
-            item = xbmcgui.ListItem("%s" % item, thumbnailImage=self.icon)
-            xbmcplugin.addDirectoryItem(self.handle, "", item, False)
+        item = xbmcgui.ListItem("Reset search results", thumbnailImage=self.icon)
+        xbmcplugin.addDirectoryItem(self.handle, self.xpath + '?mode=reset', item, False)
 
         xbmcplugin.endOfDirectory(self.handle, True)
 
-    def search(self, query):
-        print "*** UnifiedSearch: search: %s" % query
+    def search(self, keyword):
+        self.log("Call other add-ons and pass keyword: %s" % keyword)
 
         item = xbmcgui.ListItem("Please wait ...", thumbnailImage=self.icon)
         xbmcplugin.addDirectoryItem(self.handle, sys.argv[0], item, False)
 
         # Send keyword to supported add-ons
-        for i, addon in enumerate(self.supported_addons):
-            script = "special://home/addons/%s/default.py" % addon
-            xbmc.executebuiltin("XBMC.RunScript(%s, %d, mode=unified_search&query=Drift)" % (script, self.handle))
-        
+        for i, plugin in enumerate(self.supported_addons):
+            script = "special://home/addons/%s/default.py" % plugin
+            xbmc.executebuiltin("XBMC.RunScript(%s, %d, mode=unified_search&keyword=Drift)" % (script, self.handle))
+
         xbmcplugin.endOfDirectory(self.handle, True)
 
-    def collect(self, results):
-        print "*** UnifiedSearch: save results to DB %s" % results
+    def play(self, plugin, url):
+        self.log("%s => %s" % (plugin, url))
 
+        script = "special://home/addons/%s/default.py" % plugin
+        xbmc.executebuiltin("XBMC.RunScript(%s, %d, mode=play&url=%s)" % (script, self.handle, urllib.quote(url)))
+
+    def get_supported_addons(self):
+        request = '{"jsonrpc": "2.0", "method": "Addons.GetAddons", "params": {"properties": ["summary"]}, "id": 1}'
+
+        response = json.loads(xbmc.executeJSONRPC(request))["result"]["addons"]
+        supported = []
+
+        for i, addon in enumerate(response):
+            try:
+                if not 'pvr' in addon["addonid"] and xbmcaddon.Addon(addon["addonid"]).getSetting('unified_search') == 'true':
+                    supported.append(addon["addonid"])
+            except RuntimeError:
+                pass
+
+        return supported
+
+    # RESULTS handling
+    def collect(self, results):
+        self.log("Save results to DB %s" % results)
         self.saveSearchResults(results)
-        xbmc.executebuiltin("Container.Update(plugin://%s,replace)" % self.id)            
+        xbmc.executebuiltin("Container.Update(plugin://%s,replace)" % self.id)
 
     def getSearchResults(self):
-        # self.resetResults()
-        print "*** UnifiedSearch:  Get search results from storage"
+        self.log("Get search results from storage")
 
-        try: 
+        try:
             results = json.loads(self.addon.getSetting("results"))
             return results
         except ValueError:
             return []
 
-    def  saveSearchResults(self, item):
-        print "*** UnifiedSearch: Save search rsults in settings %s" % (item)
+    def saveSearchResults(self, item):
+        self.log("Save search rsults in settings %s" % (item))
 
-        results = self.getSearchResults()
-        
-        if not item in results:
-            results.append(item)
-            self.addon.setSetting("results", json.dumps(results))
+        try:
+            results = self.getSearchResults()
+
+            if not item in results:
+                results.append(item)
+                self.addon.setSetting("results", json.dumps(results))
+        except Exception, e:
+            self.error(e)
 
     def resetResults(self):
         print "Reset results"
         self.addon.setSetting("results", "")
+        xbmc.executebuiltin("Container.refresh()")
 
-    def get_supported_addons(self):
-         request = '{"jsonrpc": "2.0", "method": "Addons.GetAddons", "params": {"properties": ["summary"]}, "id": 1}'
-         response = json.loads(xbmc.executeJSONRPC(request))["result"]["addons"]
-         supported = []
+    # Addon helpers
+    def log(self, message):
+        if self.debug:
+            print "### %s: %s" % (self.id, message)
 
-         for i, addon in enumerate(response):
-            try:
-                if not 'pvr' in  addon["addonid"] and xbmcaddon.Addon(addon["addonid"]).getSetting('unified_search') == 'true':
-                    supported.append(addon["addonid"])
-            except RuntimeError:
-                pass
-
-         return supported
+    def error(self, message):
+        print "%s ERROR: %s" % (self.id, message)
